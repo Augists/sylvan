@@ -1,10 +1,13 @@
-# MacOS file
-.DS_Store
+# CMake build tree
+/build/
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/Makefile
 
-# eclipse files
-.cproject
-.project
-.settings
-
-# CMake files
-build/
+# Generated artifacts
+*.o
+*.a
+*.so
+*.dll
+*.dylib

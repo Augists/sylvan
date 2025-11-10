@@ -13,6 +13,7 @@
 
 #include <sylvan.h>
 #include <sylvan_table.h>
+#include <sylvan_stats.h>
 
 /* Configuration */
 static int report_minterms = 0; // report minterms at every major step
@@ -291,8 +292,13 @@ VOID_TASK_0(run)
 
     double t2 = wctime();
 
-    INFO("Result: NQueens(%zu) has %.0f solutions.\n", size, sylvan_satcount(res, vars));
+    const double solutions = sylvan_satcount(res, vars);
+    INFO("Result: NQueens(%zu) has %.0f solutions.\n", size, solutions);
     INFO("Result BDD has %zu nodes.\n", sylvan_nodecount(res));
+    sylvan_stats_t snapshot;
+    sylvan_stats_snapshot(&snapshot);
+    uint64_t nodes_created = snapshot.counters[BDD_NODES_CREATED];
+    printf("NQUEENS_METRICS n=%zu solutions=%.0f nodes=%" PRIu64 "\n", size, solutions, nodes_created);
     INFO("Computation time: %f sec.\n", t2-t1);
 }
 
@@ -315,7 +321,11 @@ main(int argc, char** argv)
     // Cache table size: 36 bytes * cache entries
     // With 2^20 nodes and 2^18 cache entries, that's 33 MB
     // With 2^24 nodes and 2^22 cache entries, that's 528 MB
-    sylvan_set_sizes(1LL<<20, 1LL<<24, 1LL<<18, 1LL<<22);
+    uint64_t min_nodes = 1LL<<21;
+    uint64_t max_nodes = (size >= 12) ? 1LL<<28 : 1LL<<26;
+    uint64_t min_cache = 1LL<<19;
+    uint64_t max_cache = (size >= 12) ? 1LL<<26 : 1LL<<24;
+    sylvan_set_sizes(min_nodes, max_nodes, min_cache, max_cache);
     sylvan_init_package();
     sylvan_set_granularity(3); // granularity 3 is decent value for this small problem - 1 means "use cache for every operation"
     sylvan_init_bdd();
@@ -333,4 +343,3 @@ main(int argc, char** argv)
     sylvan_quit();
     lace_stop();
 }
-
