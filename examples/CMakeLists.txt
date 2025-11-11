@@ -21,6 +21,6 @@ add_example(ldd2bdd ldd2bdd.c)
 target_sources(ldd2bdd PRIVATE getrss.c getrss.h)
 
 add_example(nqueens nqueens.c)
+add_example(nqueens_fast nqueens_fast.c)
 
 add_example(simple simple.cpp)
-
