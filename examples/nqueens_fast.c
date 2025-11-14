@@ -55,7 +55,11 @@ main(int argc, char **argv)
 
     lace_start(workers, 1000000);
 
-    sylvan_set_sizes(1LL<<21, 1LL<<27, 1LL<<19, 1LL<<25);
+    uint64_t min_nodes = 1LL<<21;
+    uint64_t max_nodes = board_size >= 12 ? 1LL<<29 : board_size >= 11 ? 1LL<<28 : 1LL<<26;
+    uint64_t min_cache = 1LL<<19;
+    uint64_t max_cache = board_size >= 12 ? 1LL<<27 : board_size >= 11 ? 1LL<<26 : 1LL<<24;
+    sylvan_set_sizes(min_nodes, max_nodes, min_cache, max_cache);
     sylvan_init_package();
     sylvan_init_bdd();
 
