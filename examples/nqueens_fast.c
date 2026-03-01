@@ -144,9 +144,10 @@ main(int argc, char **argv)
     sylvan_stats_t snapshot;
     sylvan_stats_snapshot(&snapshot);
     uint64_t nodes_created = snapshot.counters[BDD_NODES_CREATED];
+    size_t nodes_alive = sylvan_nodecount(res);
 
-    printf("NQUEENS_METRICS n=%zu solutions=%.0f nodes=%" PRIu64 "\n",
-        board_size, solutions, nodes_created);
+    printf("NQUEENS_METRICS n=%zu solutions=%.0f nodes_created=%" PRIu64 " nodes_alive=%zu\n",
+        board_size, solutions, nodes_created, nodes_alive);
 
     sylvan_unprotect(&vars);
     sylvan_unprotect(&res);
