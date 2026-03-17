@@ -194,4 +194,3 @@ export(EXPORT sylvan-targets
     FILE ${CMAKE_CURRENT_BINARY_DIR}/cmake/sylvan-targets.cmake
     NAMESPACE sylvan::
 )
-
