@@ -2,8 +2,13 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <sys/types.h>
+
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 #include <sylvan.h>
 #include <sylvan_stats.h>
@@ -74,10 +79,17 @@ configured_memory_cap(void)
 static uint64_t
 detected_physical_memory(void)
 {
+#if defined(_WIN32)
+    MEMORYSTATUSEX status;
+    status.dwLength = sizeof(status);
+    if (!GlobalMemoryStatusEx(&status)) return 0;
+    return (uint64_t)status.ullTotalPhys;
+#else
     long pages = sysconf(_SC_PHYS_PAGES);
     long page_size = sysconf(_SC_PAGE_SIZE);
     if (pages <= 0 || page_size <= 0) return 0;
     return (uint64_t)pages * (uint64_t)page_size;
+#endif
 }
 
 static uint64_t
