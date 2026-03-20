@@ -4,14 +4,6 @@
 #include <stdlib.h>
 #include <sys/types.h>
 
-#if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#define NOGDI
-#include <windows.h>
-#else
-#include <unistd.h>
-#endif
-
 #include <sylvan.h>
 #include <sylvan_stats.h>
 #include <sylvan_table.h>
@@ -56,65 +48,6 @@ implies_not(BDD a, BDD b)
     return sylvan_or(sylvan_not(a), sylvan_not(b));
 }
 
-static uint64_t
-gibibytes(uint64_t value)
-{
-    return value * 1024ULL * 1024ULL * 1024ULL;
-}
-
-static uint64_t
-configured_memory_cap(void)
-{
-    const char *env = getenv("NQUEENS_SYLVAN_MEMORY_CAP_MB");
-    if (env == NULL || *env == '\0') return 0;
-
-    char *end = NULL;
-    unsigned long long value = strtoull(env, &end, 10);
-    if (end == env || *end != '\0' || value == 0) {
-        fprintf(stderr, "Ignoring invalid NQUEENS_SYLVAN_MEMORY_CAP_MB=%s\n", env);
-        return 0;
-    }
-
-    return (uint64_t)value * 1024ULL * 1024ULL;
-}
-
-static uint64_t
-detected_physical_memory(void)
-{
-#if defined(_WIN32)
-    MEMORYSTATUSEX status;
-    status.dwLength = sizeof(status);
-    if (!GlobalMemoryStatusEx(&status)) return 0;
-    return (uint64_t)status.ullTotalPhys;
-#else
-    long pages = sysconf(_SC_PHYS_PAGES);
-    long page_size = sysconf(_SC_PAGE_SIZE);
-    if (pages <= 0 || page_size <= 0) return 0;
-    return (uint64_t)pages * (uint64_t)page_size;
-#endif
-}
-
-static uint64_t
-choose_memory_cap(void)
-{
-    uint64_t configured = configured_memory_cap();
-    if (configured != 0) return configured;
-
-    uint64_t requested = board_size >= 12 ? gibibytes(10) :
-        board_size >= 11 ? gibibytes(6) :
-        gibibytes(3);
-
-    uint64_t physical = detected_physical_memory();
-    if (physical != 0) {
-        uint64_t safe_cap = physical * 3 / 4;
-        uint64_t minimum_cap = 1024ULL * 1024ULL * 1024ULL;
-        if (safe_cap < minimum_cap) safe_cap = minimum_cap;
-        if (requested > safe_cap) requested = safe_cap;
-    }
-
-    return requested;
-}
-
 int
 main(int argc, char **argv)
 {
@@ -122,12 +55,11 @@ main(int argc, char **argv)
 
     lace_start(workers, 1000000);
 
-    /*
-     * Use Sylvan's limit-based sizing instead of hard-coding large tables.
-     * The old n>=11 tier jumped straight to ~8.25 GiB of node+cache capacity,
-     * which easily turns into swapping or OOM on modest machines.
-     */
-    sylvan_set_limits(choose_memory_cap(), 2, 5);
+    uint64_t min_nodes = 1LL<<21;
+    uint64_t max_nodes = board_size >= 12 ? 1LL<<29 : board_size >= 11 ? 1LL<<28 : 1LL<<26;
+    uint64_t min_cache = 1LL<<19;
+    uint64_t max_cache = board_size >= 12 ? 1LL<<27 : board_size >= 11 ? 1LL<<26 : 1LL<<24;
+    sylvan_set_sizes(min_nodes, max_nodes, min_cache, max_cache);
     sylvan_init_package();
     sylvan_init_bdd();
 
