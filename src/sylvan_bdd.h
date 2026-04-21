@@ -52,6 +52,19 @@ sylvan_isnode(MTBDD bdd)
 void sylvan_set_granularity(int granularity);
 int sylvan_get_granularity(void);
 
+/**
+ * Spawn depth cutoff for BDD operations.
+ *
+ *   <0  (default -1): unlimited — every eligible sub-problem is SPAWNed,
+ *                      preserving Sylvan's original behaviour.
+ *    0             : no BDD-internal spawning — all recursive sub-problems
+ *                      execute sequentially via CALL.
+ *   >0  (e.g. 3)  : SPAWN only when the nested depth on this worker < cutoff,
+ *                      otherwise CALL.
+ */
+void sylvan_set_spawn_depth_cutoff(int value);
+int sylvan_get_spawn_depth_cutoff(void);
+
 /*
  * Unary, binary and if-then-else operations.
  * These operations are all implemented by NOT, AND and XOR.
