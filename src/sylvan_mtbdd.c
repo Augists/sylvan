@@ -126,11 +126,90 @@ static inline unsigned int mtbdd_worker_id(void)
     return worker ? (unsigned int)worker->worker : 0;
 }
 
+/*
+ * Coalescing ref cache (perf bottleneck analysis, 2026-04-21)
+ *
+ * refs_up / refs_down were the #1 and #2 hot functions (~28% combined on
+ * N=12 W=6). The per-worker refs sharding eliminated contention but each
+ * call still hashes into the per-worker table and atomically bumps a
+ * counter. MTPNDD protects every BDD edge label (~213 call sites), and
+ * the same handful of labels gets ref/deref'd many times per operation.
+ *
+ * Strategy: a tiny thread-local cache of recent ref deltas. mtbdd_ref /
+ * mtbdd_deref first try to coalesce into this cache. A hit avoids the
+ * hash probe entirely. Consecutive ref/deref of the same handle cancel
+ * out in the cache with no global traffic at all.
+ *
+ * Flushed per-worker via TOGETHER at GC time so the per-worker refs
+ * tables reflect the net count before mark-and-sweep.
+ */
+#define MTBDD_REF_CACHE_SIZE 16
+
+struct mtbdd_ref_cache_entry {
+    MDD key;          /* 0 = empty slot */
+    int32_t delta;    /* pending net count change */
+    int32_t _pad;     /* keep struct 16-byte aligned */
+};
+
+static _Thread_local struct {
+    struct mtbdd_ref_cache_entry e[MTBDD_REF_CACHE_SIZE];
+    unsigned int victim;
+} mtbdd_ref_cache;
+
+static inline void mtbdd_ref_cache_evict(int i, unsigned int wid)
+{
+    if (mtbdd_ref_cache.e[i].key != 0 && mtbdd_ref_cache.e[i].delta != 0) {
+        refs_set_add(&mtbdd_refs[wid], mtbdd_ref_cache.e[i].key, mtbdd_ref_cache.e[i].delta);
+    }
+    mtbdd_ref_cache.e[i].key = 0;
+    mtbdd_ref_cache.e[i].delta = 0;
+}
+
+static inline void mtbdd_ref_cache_op(MDD a, int32_t delta)
+{
+    int empty = -1;
+    for (int i = 0; i < MTBDD_REF_CACHE_SIZE; i++) {
+        if (mtbdd_ref_cache.e[i].key == a) {
+            mtbdd_ref_cache.e[i].delta += delta;
+            return;
+        }
+        if (empty < 0 && mtbdd_ref_cache.e[i].key == 0) {
+            empty = i;
+        }
+    }
+    if (empty >= 0) {
+        mtbdd_ref_cache.e[empty].key = a;
+        mtbdd_ref_cache.e[empty].delta = delta;
+        return;
+    }
+    /* Full: evict round-robin victim, install new entry. */
+    unsigned int v = mtbdd_ref_cache.victim;
+    mtbdd_ref_cache_evict(v, mtbdd_worker_id());
+    mtbdd_ref_cache.e[v].key = a;
+    mtbdd_ref_cache.e[v].delta = delta;
+    mtbdd_ref_cache.victim = (v + 1) % MTBDD_REF_CACHE_SIZE;
+}
+
+static inline void mtbdd_ref_cache_flush_local(void)
+{
+    unsigned int wid = mtbdd_worker_id();
+    for (int i = 0; i < MTBDD_REF_CACHE_SIZE; i++) {
+        mtbdd_ref_cache_evict(i, wid);
+    }
+    mtbdd_ref_cache.victim = 0;
+}
+
+VOID_TASK_DECL_0(mtbdd_ref_cache_flush_task)
+VOID_TASK_IMPL_0(mtbdd_ref_cache_flush_task)
+{
+    mtbdd_ref_cache_flush_local();
+}
+
 MDD
 mtbdd_ref(MDD a)
 {
     if (a == mtbdd_true || a == mtbdd_false) return a;
-    refs_up(&mtbdd_refs[mtbdd_worker_id()], MTBDD_STRIPMARK(a));
+    mtbdd_ref_cache_op(MTBDD_STRIPMARK(a), +1);
     return a;
 }
 
@@ -138,12 +217,14 @@ void
 mtbdd_deref(MDD a)
 {
     if (a == mtbdd_true || a == mtbdd_false) return;
-    refs_down(&mtbdd_refs[mtbdd_worker_id()], MTBDD_STRIPMARK(a));
+    mtbdd_ref_cache_op(MTBDD_STRIPMARK(a), -1);
 }
 
 size_t
 mtbdd_count_refs()
 {
+    /* Cache contents not included; accurate only immediately after a GC
+     * flush. Fine for debug stats. */
     size_t total = 0;
     for (size_t i = 0; i < mtbdd_refs_workers; i++) {
         total += refs_count(&mtbdd_refs[i]);
@@ -183,6 +264,11 @@ mtbdd_count_protected()
  */
 VOID_TASK_0(mtbdd_gc_mark_external_refs)
 {
+    /* Drain per-worker coalescing caches into the real refs tables
+     * before iterating them. Each worker flushes its own thread-local
+     * cache via TOGETHER. */
+    TOGETHER(mtbdd_ref_cache_flush_task);
+
     if (!mtbdd_refs_merge_created) {
         refs_create(&mtbdd_refs_merge, SYLVAN_REFS_INIT_SIZE);
         mtbdd_refs_merge_created = 1;
