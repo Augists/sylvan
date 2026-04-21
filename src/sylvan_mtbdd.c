@@ -103,17 +103,34 @@ VOID_TASK_IMPL_1(mtbdd_gc_mark_rec, MDD, mtbdd)
 
 /**
  * External references
+ *
+ * Per-worker refs sharding (ported from feature/c commit 50c738d):
+ * Each Lace worker has its own refs_table_t; mtbdd_ref/deref write only to
+ * the current worker's table (no contention).  At GC time we merge all
+ * worker tables into `mtbdd_refs_merge` and mark entries whose net count
+ * (sum over workers) is > 0.  refs_modify in our sylvan_refs.c supports
+ * signed deltas, so a deref on a different worker than the original ref
+ * produces a local -1 that cancels at merge.
  */
 
-refs_table_t mtbdd_refs;
+refs_table_t *mtbdd_refs = NULL;
+static refs_table_t mtbdd_refs_merge;
+static int mtbdd_refs_merge_created = 0;
+static size_t mtbdd_refs_workers = 0;
 refs_table_t mtbdd_protected;
 static int mtbdd_protected_created = 0;
+
+static inline unsigned int mtbdd_worker_id(void)
+{
+    WorkerP *worker = lace_get_worker();
+    return worker ? (unsigned int)worker->worker : 0;
+}
 
 MDD
 mtbdd_ref(MDD a)
 {
     if (a == mtbdd_true || a == mtbdd_false) return a;
-    refs_up(&mtbdd_refs, MTBDD_STRIPMARK(a));
+    refs_up(&mtbdd_refs[mtbdd_worker_id()], MTBDD_STRIPMARK(a));
     return a;
 }
 
@@ -121,13 +138,17 @@ void
 mtbdd_deref(MDD a)
 {
     if (a == mtbdd_true || a == mtbdd_false) return;
-    refs_down(&mtbdd_refs, MTBDD_STRIPMARK(a));
+    refs_down(&mtbdd_refs[mtbdd_worker_id()], MTBDD_STRIPMARK(a));
 }
 
 size_t
 mtbdd_count_refs()
 {
-    return refs_count(&mtbdd_refs);
+    size_t total = 0;
+    for (size_t i = 0; i < mtbdd_refs_workers; i++) {
+        total += refs_count(&mtbdd_refs[i]);
+    }
+    return total;
 }
 
 void
@@ -153,15 +174,44 @@ mtbdd_count_protected()
     return protect_count(&mtbdd_protected);
 }
 
-/* Called during garbage collection */
+/* Called during garbage collection
+ *
+ * Merge all per-worker refs tables into mtbdd_refs_merge (as signed counts),
+ * then mark entries with net > 0.  Entries with net <= 0 are effectively
+ * cancelled (a deref from a different worker than the ref produced a local
+ * -1 that, when summed with the original worker's +1, cancels out).
+ */
 VOID_TASK_0(mtbdd_gc_mark_external_refs)
 {
-    // iterate through refs hash table, mark all found
-    size_t count=0;
-    uint64_t *it = refs_iter(&mtbdd_refs, 0, mtbdd_refs.refs_size);
+    if (!mtbdd_refs_merge_created) {
+        refs_create(&mtbdd_refs_merge, SYLVAN_REFS_INIT_SIZE);
+        mtbdd_refs_merge_created = 1;
+    }
+    refs_clear(&mtbdd_refs_merge);
+
+    /* Merge per-worker tables into mtbdd_refs_merge using signed deltas. */
+    for (size_t w = 0; w < mtbdd_refs_workers; w++) {
+        refs_table_t *t = &mtbdd_refs[w];
+        uint64_t *it = refs_iter(t, 0, t->refs_size);
+        while (it != NULL) {
+            int32_t count = 0;
+            uint64_t key = refs_next_full(t, &it, t->refs_size, &count);
+            if (count != 0) {
+                refs_set_add(&mtbdd_refs_merge, key, count);
+            }
+        }
+    }
+
+    /* Iterate merged table, mark only entries with positive net count. */
+    size_t count = 0;
+    uint64_t *it = refs_iter(&mtbdd_refs_merge, 0, mtbdd_refs_merge.refs_size);
     while (it != NULL) {
-        SPAWN(mtbdd_gc_mark_rec, refs_next(&mtbdd_refs, &it, mtbdd_refs.refs_size));
-        count++;
+        int32_t net = 0;
+        uint64_t key = refs_next_full(&mtbdd_refs_merge, &it, mtbdd_refs_merge.refs_size, &net);
+        if (net > 0) {
+            SPAWN(mtbdd_gc_mark_rec, key);
+            count++;
+        }
     }
     while (count--) {
         SYNC(mtbdd_gc_mark_rec);
@@ -390,7 +440,16 @@ static void
 mtbdd_quit(void)
 {
     TOGETHER(mtbdd_refs_free);
-    refs_free(&mtbdd_refs);
+    for (size_t i = 0; i < mtbdd_refs_workers; i++) {
+        refs_free(&mtbdd_refs[i]);
+    }
+    free(mtbdd_refs);
+    mtbdd_refs = NULL;
+    mtbdd_refs_workers = 0;
+    if (mtbdd_refs_merge_created) {
+        refs_free(&mtbdd_refs_merge);
+        mtbdd_refs_merge_created = 0;
+    }
     if (mtbdd_protected_created) {
         protect_free(&mtbdd_protected);
         mtbdd_protected_created = 0;
@@ -411,9 +470,16 @@ sylvan_init_mtbdd(void)
     sylvan_gc_add_mark(mtbdd_gc_mark_external_refs_CALL);
     sylvan_gc_add_mark(mtbdd_gc_mark_protected_CALL);
 
-    refs_create(&mtbdd_refs, 1024);
+    /* Allocate per-worker refs tables. lace_workers() reflects the number
+     * of workers started by lace_start() before sylvan_init_*() is called. */
+    mtbdd_refs_workers = lace_workers();
+    if (mtbdd_refs_workers == 0) mtbdd_refs_workers = 1;
+    mtbdd_refs = (refs_table_t *)calloc(mtbdd_refs_workers, sizeof(refs_table_t));
+    for (size_t i = 0; i < mtbdd_refs_workers; i++) {
+        refs_create(&mtbdd_refs[i], SYLVAN_REFS_INIT_SIZE);
+    }
     if (!mtbdd_protected_created) {
-        protect_create(&mtbdd_protected, 4096);
+        protect_create(&mtbdd_protected, SYLVAN_PROTECT_INIT_SIZE);
         mtbdd_protected_created = 1;
     }
 

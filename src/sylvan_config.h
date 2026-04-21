@@ -33,3 +33,12 @@
 #ifndef SYLVAN_AGGRESSIVE_RESIZE
 #define SYLVAN_AGGRESSIVE_RESIZE 1
 #endif
+
+/* Initial size for external refs/protect tables (must be power of 2) */
+#ifndef SYLVAN_REFS_INIT_SIZE
+#define SYLVAN_REFS_INIT_SIZE 1024
+#endif
+
+#ifndef SYLVAN_PROTECT_INIT_SIZE
+#define SYLVAN_PROTECT_INIT_SIZE 4096
+#endif
